@@ -1,0 +1,178 @@
+---
+title: "p8106_hw1_lr3257"
+author: "Leyang Rui"
+date: "2025-02-15"
+output: pdf_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# p8106 Homework 1
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library(ISLR)
+library(glmnet)
+library(caret)
+library(tidymodels)
+library(tidyverse)
+library(ggplot2)
+library(pls)
+
+set.seed(123)
+```
+
+### Data import & clearning
+
+For easier model interpretation, I changed variables year_built and year_sold from categorical to numerical variables.
+
+```{r, message=FALSE}
+housing_test = read_csv("data/housing_test.csv") |>
+  janitor::clean_names() |>
+  mutate(year_built = as.numeric(year_built),
+         year_sold = as.numeric(year_sold))
+
+housing_train = read_csv("data/housing_training.csv") |>
+  janitor::clean_names() |>
+  mutate(year_built = as.numeric(year_built),
+         year_sold = as.numeric(year_sold))
+```
+
+(a) Fit a lasso model on the training data. Report the selected tuning parameter and the test error. When the 1SE rule is applied, how many predictors are included in the model?
+
+```{r, message=FALSE}
+x = model.matrix(sale_price ~ ., housing_train)[, -1]
+y = housing_train[["sale_price"]]
+```
+
+```{r, message=FALSE}
+lasso.model = glmnet(x, y, alpha = 1,
+                        lambda = exp(seq(8, -5, length = 100)))
+
+cv.lasso = cv.glmnet(x, y, alpha = 1,
+                        lambda = exp(seq(8, -5, length = 100)))
+
+plot(cv.lasso)
+```
+
+```{r, message=FALSE}
+cv_lambda_min = cv.lasso$lambda.min
+
+x_test = model.matrix(sale_price ~ ., housing_test)[, -1]
+y_test = housing_test[["sale_price"]]
+
+y_pred_lasso = predict(lasso.model, newx = x_test, s = cv_lambda_min)
+
+test_mse_lasso = mean((y_test - y_pred_lasso)^2)
+```
+
+For a smallest test MSE of `r test_mse_lasso`, the lambda is about `r cv_lambda_min`
+
+```{r, message=FALSE}
+cv.lasso$lambda.1se
+coef_1se = coef(cv.lasso, s = cv.lasso$lambda.1se)
+num_coef_1se = sum(coef_1se[-1] != 0)
+```
+
+When the 1SE rule is applied, around `r num_coef_1se` predictors are included in the model.
+
+(b) Fit an elastic net model on the training data. Report the selected tuning parameters and the test error. Is it possible to apply the 1SE rule to select the tuning parameters for elastic net? If the 1SE rule is applicable, implement it to select the tuning parameters. If not, explain why.
+
+```{r, message=FALSE}
+ctrl1 = trainControl(method = "cv", number = 10)
+
+enet.model = train(sale_price ~ .,
+                  data = housing_train,
+                  method = "glmnet",
+                  tuneGrid = expand.grid(alpha = seq(0, 1, length = 21), 
+                                         lambda = exp(seq(-10, 10, length = 100))),
+                  trControl = ctrl1)
+enet.model$bestTune
+```
+
+```{r, message=FALSE}
+x_test = housing_test
+y_test = housing_test$sale_price
+
+y_pred_enet = predict(enet.model, newdata = x_test)
+
+test_mse_enet = mean((y_test - y_pred_enet)^2)
+```
+
+For a smallest test MSE of `r test_mse_enet`, the lambda is about `r enet.model$bestTune$lambda`
+
+Yes, the 1SE rule is applicable:
+
+```{r, message=FALSE}
+min_rmse = min(enet.model$results$RMSE)
+
+se_rmse = sd(enet.model$results$RMSE) / sqrt(nrow(enet.model$resample))
+lambda_1se_threshold = min_rmse + se_rmse
+
+enet_1se = enet.model$results |>
+  filter(RMSE <= lambda_1se_threshold) |>
+  arrange(desc(lambda)) |>
+  slice(1)
+```
+
+The tuning parameter lambda using 1SE rule is `r enet_1se$lambda`
+
+(c) Fit a partial least squares model on the training data and report the test error. How many components are included in your model?
+
+```{r, message=FALSE}
+pls.model = plsr(sale_price ~ ., data = housing_train,
+                 scale = TRUE, validation = "CV")
+summary(pls.model)
+
+cv_mse = RMSEP(pls.model)
+ncomp_cv = which.min(cv_mse$val[1,,]) - 1
+
+y_pred_pls = predict(pls.model, newdata = housing_test, 
+                   ncomp = ncomp_cv)
+test_mse_pls = mean((y_test - y_pred_pls)^2)
+```
+
+The test MSE of the partial least squares model is `r test_mse_pls`, while the model has `r as.numeric(ncomp_cv)` components
+
+(d) Choose the best model for predicting the response and explain your choice.
+
+```{r, message=FALSE}
+lasso.model = train(sale_price ~ ., data = housing_train,
+                     method = "glmnet",
+                     tuneGrid = expand.grid(alpha = 1, 
+                                            lambda = exp(seq(-10, 10, length = 100))),
+                     trControl = ctrl1)
+
+pls.model = train(sale_price ~ ., data = housing_train,
+                   method = "pls",
+                   tuneLength = 10,
+                   trControl = ctrl1)
+
+resamp = resamples(list(lasso = lasso.model,
+                        elastic_net = enet.model,
+                        pls = pls.model))
+
+summary(resamp)
+bwplot(resamp, metric = "RMSE")
+```
+
+I will choose the lasso model as the best model. Since the lasso model has both a smallest median RMSE and its distribution of RMSE is the most concentrated (despite the outliers), although it has a few outlier cases, it will still be the best and the most stable model in general.
+
+(e) If R package “caret” was used for the lasso in (a), retrain this model using R package “glmnet”, and vice versa. Compare the selected tuning parameters between the two software approaches. Should there be discrepancies in the chosen parameters, discuss potential reasons for these differences.
+
+```{r, message=FALSE}
+### Using caret here:
+lasso.model = train(sale_price ~ ., data = housing_train,
+                     method = "glmnet",
+                     tuneGrid = expand.grid(alpha = 1, 
+                                            lambda = exp(seq(10, -10, length = 100))),
+                     trControl = ctrl1)
+lasso.model$bestTune
+cv_lambda_min
+```
+
+The results above show that the lambda from using the "caret" package is larger than that from using the "glmnet" package. The difference may come from how the "glmnet" method does cross validation together with building the model, while the "caret" method has an extra step of standardizing tuning process. 
+
+
+
+
+
